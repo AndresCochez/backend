@@ -1,49 +1,102 @@
+// backend/server.js
 require('dotenv').config();
 
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const Order = require('./models/Order');
 
+// -------------------- App setup --------------------
 const app = express();
-app.use(cors());
-app.use(express.json());
 
-// --- MongoDB connection (with graceful fallback) ---
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/benjerrys';
+// CORS: tijdelijk alles toestaan (lekker simpel voor nu).
+// Wil je dit strakker maken: zet hier je Vercel-origin(s) in de 'origin' array.
+app.use(cors());
+app.options('*', cors());
+
+// Body parser (zet dit vóór je routes)
+app.use(express.json({ limit: '1mb' }));
+
+// Optioneel: statische assets (fonts/images) met headers die cross-origin toelaten.
+// Laat dit staan; schaadt niet, helpt als je later /resources serveert.
+app.use(
+  '/resources',
+  express.static(path.join(__dirname, 'resources'), {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.woff') || filePath.endsWith('.woff2')) {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        res.setHeader('Content-Type', filePath.endsWith('.woff2') ? 'font/woff2' : 'font/woff');
+      }
+    },
+  })
+);
+
+// -------------------- MongoDB connection --------------------
+const MONGODB_URI =
+  (process.env.MONGODB_URI && process.env.MONGODB_URI.trim()) ||
+  'mongodb://127.0.0.1:27017/benjerrys';
+
 let dbConnected = false;
 let memOrders = []; // in-memory fallback
 
-(async () => {
+// Log de host (zonder wachtwoord) zodat je in Render meteen ziet waar hij heen connecteert
+const masked = MONGODB_URI.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@');
+console.log('[DB] Using URI:', masked);
+
+async function connectMongo() {
   try {
-    await mongoose.connect(MONGODB_URI);
-    dbConnected = true;
+    await mongoose.connect(MONGODB_URI, {
+      serverSelectionTimeoutMS: 8000, // sneller falen als Atlas niet bereikbaar/geen auth
+    });
     console.log('[DB] Verbonden met MongoDB');
   } catch (err) {
-    dbConnected = false;
     console.warn('[DB] Verbinding mislukt, gebruik in-memory opslag. Fout:', err.message);
   }
-})();
+}
 
-// --- Helpers ---
-function sanitizeOrderInput(body){
+mongoose.connection.on('connected', () => {
+  dbConnected = true;
+  console.log('[DB] Status: connected');
+});
+
+mongoose.connection.on('disconnected', () => {
+  dbConnected = false;
+  console.warn('[DB] Status: disconnected (val terug op in-memory)');
+});
+
+mongoose.connection.on('error', (err) => {
+  dbConnected = false;
+  console.error('[DB] Mongoose error:', err.message);
+});
+
+// Kick off connect (asynchroon)
+connectMongo();
+
+// -------------------- Helpers --------------------
+function sanitizeOrderInput(body) {
   const { scoop, cone, sprinkles, customer, price } = body || {};
   return { scoop, cone, sprinkles, customer, price };
 }
 
-function isValidOrder({ scoop, cone, sprinkles, customer, price }){
+function isValidOrder({ scoop, cone, sprinkles, customer, price }) {
   if (!scoop || !cone || !sprinkles) return false;
   if (!customer || !customer.name || !customer.address) return false;
   if (price === undefined || price === null || isNaN(Number(price))) return false;
   return true;
 }
 
-// --- Routes ---
+// -------------------- Routes --------------------
 
 // Health
 app.get('/api/health', (req, res) => {
-  const state = mongoose.connection.readyState;
-  res.json({ ok: true, mongo: state === 1 ? 'connected' : 'not_connected' });
+  const state = mongoose.connection.readyState; // 0=disconnected,1=connected,2=connecting,3=disconnecting
+  const label =
+    state === 1 ? 'connected' : state === 2 ? 'connecting' : state === 3 ? 'disconnecting' : 'not_connected';
+  const host = (MONGODB_URI.split('@')[1] || '').split('/')[0] || null;
+  res.json({ ok: true, mongo: label, host });
 });
 
 // List orders
@@ -53,7 +106,7 @@ app.get('/api/orders', async (req, res) => {
       const orders = await Order.find().sort({ date: -1 }).lean();
       return res.json(orders);
     } else {
-      const sorted = [...memOrders].sort((a,b)=> new Date(b.date)-new Date(a.date));
+      const sorted = [...memOrders].sort((a, b) => new Date(b.date) - new Date(a.date));
       return res.json(sorted);
     }
   } catch (error) {
@@ -70,7 +123,7 @@ app.get('/api/orders/:id', async (req, res) => {
       if (!doc) return res.status(404).json({ message: 'Niet gevonden' });
       return res.json(doc);
     } else {
-      const doc = memOrders.find(o => String(o._id) === String(req.params.id));
+      const doc = memOrders.find((o) => String(o._id) === String(req.params.id));
       if (!doc) return res.status(404).json({ message: 'Niet gevonden' });
       return res.json(doc);
     }
@@ -84,7 +137,7 @@ app.get('/api/orders/:id', async (req, res) => {
 app.post('/api/orders', async (req, res) => {
   try {
     const data = sanitizeOrderInput(req.body);
-    if (!isValidOrder(data)){
+    if (!isValidOrder(data)) {
       return res.status(400).json({ message: 'Alle velden zijn verplicht' });
     }
 
@@ -96,12 +149,12 @@ app.post('/api/orders', async (req, res) => {
         name: data.customer.name,
         address: {
           street: data.customer.address.street,
-          city: data.customer.address.city
-        }
+          city: data.customer.address.city,
+        },
       },
       price: Number(data.price),
       status: 'pending',
-      date: new Date()
+      date: new Date(),
     };
 
     if (dbConnected) {
@@ -118,8 +171,8 @@ app.post('/api/orders', async (req, res) => {
   }
 });
 
-// Update status (support both POST and PATCH routes)
-async function updateStatusHandler(req, res){
+// Update status (POST en PATCH beide ondersteund)
+async function updateStatusHandler(req, res) {
   try {
     const { status } = req.body || {};
     if (!status) return res.status(400).json({ message: 'status is verplicht' });
@@ -129,7 +182,7 @@ async function updateStatusHandler(req, res){
       if (!doc) return res.status(404).json({ message: 'Niet gevonden' });
       return res.json(doc);
     } else {
-      const idx = memOrders.findIndex(o => String(o._id) === String(req.params.id));
+      const idx = memOrders.findIndex((o) => String(o._id) === String(req.params.id));
       if (idx === -1) return res.status(404).json({ message: 'Niet gevonden' });
       memOrders[idx] = { ...memOrders[idx], status };
       return res.json(memOrders[idx]);
@@ -151,7 +204,7 @@ app.delete('/api/orders/:id', async (req, res) => {
       if (!doc) return res.status(404).json({ message: 'Niet gevonden' });
       return res.json({ ok: true });
     } else {
-      const idx = memOrders.findIndex(o => String(o._id) === String(req.params.id));
+      const idx = memOrders.findIndex((o) => String(o._id) === String(req.params.id));
       if (idx === -1) return res.status(404).json({ message: 'Niet gevonden' });
       memOrders.splice(idx, 1);
       return res.json({ ok: true });
@@ -162,7 +215,7 @@ app.delete('/api/orders/:id', async (req, res) => {
   }
 });
 
-// --- Start ---
+// -------------------- Start server --------------------
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server draait op http://localhost:${PORT}`);
