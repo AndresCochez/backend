@@ -3,23 +3,36 @@ require('dotenv').config();
 
 const path = require('path');
 const express = require('express');
-const cors = require('cors');
 const mongoose = require('mongoose');
 const Order = require('./models/Order');
 
 // -------------------- App setup --------------------
 const app = express();
 
-// CORS: tijdelijk alles toestaan (lekker simpel voor nu).
-// Wil je dit strakker maken: zet hier je Vercel-origin(s) in de 'origin' array.
-app.use(cors());
-app.options('*', cors());
+/**
+ * CORS & preflight waterdicht
+ * - Zet expliciet headers voor alle routes
+ * - Handhaaf OPTIONS (preflight) met status 200
+ * - Vervang '*' later door je Vercel-origins voor productie
+ */
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*'); // bv. 'https://frontend-rose-six-82.vercel.app'
+  res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 
-// Body parser (zet dit vóór je routes)
+// (optioneel) mini request logger
+app.use((req, _res, next) => {
+  console.log(`[REQ] ${req.method} ${req.url}`);
+  next();
+});
+
+// JSON body parser vóór alle routes
 app.use(express.json({ limit: '1mb' }));
 
-// Optioneel: statische assets (fonts/images) met headers die cross-origin toelaten.
-// Laat dit staan; schaadt niet, helpt als je later /resources serveert.
+// Optioneel: statische assets (fonts/images) met juiste headers
 app.use(
   '/resources',
   express.static(path.join(__dirname, 'resources'), {
@@ -42,15 +55,13 @@ const MONGODB_URI =
 let dbConnected = false;
 let memOrders = []; // in-memory fallback
 
-// Log de host (zonder wachtwoord) zodat je in Render meteen ziet waar hij heen connecteert
+// Log de host (zonder wachtwoord)
 const masked = MONGODB_URI.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@');
 console.log('[DB] Using URI:', masked);
 
 async function connectMongo() {
   try {
-    await mongoose.connect(MONGODB_URI, {
-      serverSelectionTimeoutMS: 8000, // sneller falen als Atlas niet bereikbaar/geen auth
-    });
+    await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 8000 });
     console.log('[DB] Verbonden met MongoDB');
   } catch (err) {
     console.warn('[DB] Verbinding mislukt, gebruik in-memory opslag. Fout:', err.message);
@@ -61,12 +72,10 @@ mongoose.connection.on('connected', () => {
   dbConnected = true;
   console.log('[DB] Status: connected');
 });
-
 mongoose.connection.on('disconnected', () => {
   dbConnected = false;
   console.warn('[DB] Status: disconnected (val terug op in-memory)');
 });
-
 mongoose.connection.on('error', (err) => {
   dbConnected = false;
   console.error('[DB] Mongoose error:', err.message);
@@ -192,7 +201,6 @@ async function updateStatusHandler(req, res) {
     return res.status(500).json({ message: 'Serverfout' });
   }
 }
-
 app.post('/api/orders/:id/status', updateStatusHandler);
 app.patch('/api/orders/:id/status', updateStatusHandler);
 
